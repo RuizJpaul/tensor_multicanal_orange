@@ -21,42 +21,54 @@ def cargar_datos_multimodales():
 
     return X_spectral, X_brix, X_images, y
 
-def construir_modelo_multimodal_optimizado(input_shape_img):
-    # Rama 1: Espectral (NIR - MLP)
-    input_espectral = Input(shape=(24,), name="input_espectral")
-    x1 = Dense(64, activation="relu")(input_espectral)
-    x1 = Dropout(0.3)(x1)
-    feat_espectral = Dense(32, activation="relu", name="feat_espectral")(x1)
+def construir_modelo_multimodal_con_mlp(input_shape_img):
+    # 1. Rama Espectral (MLP)
+    input_espectral = Input(shape=(24,), name="entrada_espectral")
+    x1 = Dense(64, activation="relu", name="nir_dense_1")(input_espectral)
+    x1 = Dropout(0.3, name="nir_dropout")(x1)
+    feat_espectral = Dense(32, activation="relu", name="nir_dense_2")(x1)
 
-    # Rama 2: Físico-Química (Brix - Dense)
+    # 2. Rama Físico-Química (Brix)
     input_brix = Input(shape=(1,), name="input_brix")
-    x2 = Dense(16, activation="relu")(input_brix)
-    feat_brix = Dense(8, activation="relu", name="feat_brix")(x2)
+    x2 = Dense(16, activation="relu", name="brix_dense_1")(input_brix)
+    feat_brix = Dense(8, activation="relu", name="brix_dense_2")(x2)
 
-    # Rama 3: Visual / Fotográfica (CNN Multicanal optimizada con GlobalAveragePooling)
+    # 3. Rama Visual (CNN Multicanal optimizada)
     input_imagen = Input(shape=input_shape_img[1:], name="input_imagen")
-    x3 = Conv2D(32, (3, 3), activation="relu", padding="same")(input_imagen)
-    x3 = MaxPooling2D((2, 2))(x3)
-    x3 = Conv2D(64, (3, 3), activation="relu", padding="same")(x3)
-    x3 = MaxPooling2D((2, 2))(x3)
-    x3 = Conv2D(128, (3, 3), activation="relu", padding="same")(x3)
-    x3 = GlobalAveragePooling2D()(x3) # Reduce parámetros eficientemente
-    feat_imagen = Dense(32, activation="relu", name="feat_imagen")(x3)
+    x3 = Conv2D(32, (3, 3), activation="relu", padding="same", name="cnn_conv1")(input_imagen)
+    x3 = MaxPooling2D((2, 2), name="cnn_pool1")(x3)
+    x3 = Conv2D(64, (3, 3), activation="relu", padding="same", name="cnn_conv2")(x3)
+    x3 = MaxPooling2D((2, 2), name="cnn_pool2")(x3)
+    x3 = Conv2D(128, (3, 3), activation="relu", padding="same", name="cnn_conv3")(x3)
+    x3 = GlobalAveragePooling2D(name="cnn_gap")(x3)
+    feat_imagen = Dense(32, activation="relu", name="cnn_dense_feat")(x3)
 
-    # Capa de Fusión Multimodal (Concatenación)
+    # 4. Capa de Fusión Multimodal (Concatenación)
     fusion = concatenate([feat_espectral, feat_brix, feat_imagen], name="capa_fusion")
     
-    f = Dense(64, activation="relu")(fusion)
-    f = Dropout(0.4)(f)
-    f = Dense(32, activation="relu")(f)
+    f = Dense(64, activation="relu", name="fusion_dense_1")(fusion)
+    f = Dropout(0.4, name="fusion_dropout")(f)
+    f = Dense(32, activation="relu", name="fusion_dense_2")(f)
     
+    # Salida del Clasificador (Diagnóstico)
     output = Dense(1, activation="sigmoid", name="output_diagnostico")(f)
 
     modelo = Model(
         inputs=[input_espectral, input_brix, input_imagen],
         outputs=output,
-        name="Modelo_Multimodal_Optimizado"
+        name="Modelo_Multimodal_Completo"
     )
+    
+    # Transferencia segura de pesos desde el MLP preentrenado
+    try:
+        sub_mlp = tf.keras.models.load_model('modelo_espectral_MLP.h5', compile=False)
+        # Asignar pesos por correspondencia de capas densas
+        modelo.get_layer("nir_dense_1").set_weights(sub_mlp.get_layer("capa_densa_64").get_weights())
+        modelo.get_layer("nir_dense_2").set_weights(sub_mlp.get_layer("representacion_espectral").get_weights())
+        print("¡Pesos del MLP espectral transferidos exitosamente a la rama NIR!")
+    except Exception as e:
+        print(f"Aviso: No se pudieron cargar los pesos previos del MLP ({e}). Se inicializarán desde cero.")
+
     return modelo
 
 if __name__ == "__main__":
@@ -81,8 +93,8 @@ if __name__ == "__main__":
     X_brix_train, X_brix_test = X_brix_scaled[idx_train], X_brix_scaled[idx_test]
     X_img_train, X_img_test = X_images[idx_train], X_images[idx_test]
 
-    print("Construyendo arquitectura optimizada...")
-    modelo = construir_modelo_multimodal_optimizado(X_images.shape)
+    print("Construyendo arquitectura multimodal unificada...")
+    modelo = construir_modelo_multimodal_con_mlp(X_images.shape)
     
     modelo.compile(
         optimizer=Adam(learning_rate=0.001),
@@ -91,12 +103,11 @@ if __name__ == "__main__":
     )
     modelo.summary()
 
-    # Callback para evitar sobreajuste
     early_stopping = EarlyStopping(
         monitor='val_loss', patience=5, restore_best_weights=True, verbose=1
     )
 
-    print("Entrenando modelo multimodal optimizado...")
+    print("Entrenando modelo multimodal con fusión completa...")
     history = modelo.fit(
         [X_spec_train, X_brix_train, X_img_train],
         y_train,
@@ -107,6 +118,5 @@ if __name__ == "__main__":
         verbose=1
     )
     
-    # Guardar el modelo final entrenado para tu tesis
     modelo.save("modelo_multimodal_valencia.h5")
-    print("¡Modelo multimodal guardado exitosamente como 'modelo_multimodal_valencia.h5'!")
+    print("¡Modelo multimodal unificado guardado como 'modelo_multimodal_valencia.h5'!")
