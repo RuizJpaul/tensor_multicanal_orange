@@ -56,7 +56,7 @@ def procesar_tensor_multicanal(path_rgb, path_uv, path_nir, target_size=(224, 22
     tensor_tridimensional = np.stack([channel_rgb_norm, channel_uv_norm, channel_nir_norm], axis=-1)
     return tensor_tridimensional
 
-def construir_dataset_completo(directorio_muestras, df_labels, total_muestras=50):
+def construir_dataset_completo(directorio_muestras, df_labels, total_muestras=100):
     X_data = []
     y_data = []
     
@@ -92,10 +92,10 @@ def construir_dataset_completo(directorio_muestras, df_labels, total_muestras=50
     
     return X_dataset, y_dataset
 
-X_train, y_train = construir_dataset_completo('muestras/', df_etiquetas, total_muestras=50)
+X_train, y_train = construir_dataset_completo('muestras/', df_etiquetas, total_muestras=100)
 
 print("\n¡Dataset multicanal y etiquetas listos!")
-print(f"Forma de la matriz X (Tensores): {X_train.shape}")       # Esperado: (50, 224, 224, 3)
+print(f"Forma de la matriz X (Tensores): {X_train.shape}")       # Esperado: (100, 224, 224, 3)
 print(f"Forma del vector y (Etiquetas): {y_train.shape}")      # Esperado: (50,)
 print(f"Distribución de clases (Sanos 0 vs Dañados 1): {np.bincount(y_train)}")
 
