@@ -17,10 +17,12 @@ __pycache__/
 datos/fotos_rgb_nir_uv/
 
 # ==========================================
-# 3. Respaldos locales, documentos Word temporales y logs
+# 3. Respaldos locales, documentos Word y logs
 # ==========================================
 modelos_guardados/respaldo_*/
+INFORME.docx
 INFORME_*.docx
+*.docx
 resultados/*.log
 resultados/log_*.txt
 *.log
