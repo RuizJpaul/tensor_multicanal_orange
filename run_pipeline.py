@@ -1,58 +1,52 @@
-import os
+"""Orquestador del pipeline completo.
+
+Uso:
+  python run_pipeline.py                          # entrena las 4 ramas + prueba de carga
+  python run_pipeline.py --con-preprocesamiento   # regenera además Excel NIR y tensor de imágenes
+  python run_pipeline.py --con-cv                 # además corre la validación cruzada (lenta)
+"""
+import argparse
 import subprocess
 import sys
-import numpy as np
-from sklearn.model_selection import train_test_split
+from pathlib import Path
+
+RAIZ = Path(__file__).resolve().parent
 
 
-def correr(cmd):
-  print(f"\n>>> Ejecutando: {' '.join(cmd)}")
-  res = subprocess.run(cmd, check=False)
+def ejecutar(script_rel: str, *args: str) -> None:
+  print("\n" + "=" * 50)
+  print(f">>> Ejecutando: {script_rel} {' '.join(args)}")
+  print("=" * 50, flush=True)
+  res = subprocess.run([sys.executable, str(RAIZ / script_rel), *args], cwd=str(RAIZ), check=False)
   if res.returncode != 0:
-    print(f"[Error] Falló el comando: {' '.join(cmd)}")
+    print(f"\n[Error] Falló {script_rel} (código {res.returncode})")
     sys.exit(res.returncode)
 
 
 def main():
-  # 1. Preparar datos tabulares (NIR + Brix) e imágenes (Tensor multicanal)
-  correr([sys.executable, "estandarizacion/preparar_tabulares.py"])
-  correr([sys.executable, "estandarizacion/tensor_multicanal.py"])
+  parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+  parser.add_argument("--con-preprocesamiento", action="store_true",
+                      help="Regenera Dataset_AS7263_M1_M100.xlsx y X_dataset_multicanal.npy")
+  parser.add_argument("--con-cv", action="store_true", help="Ejecuta evaluar_cv_estratificada.py al final")
+  args = parser.parse_args()
 
-  # 2. Verificar alineación exacta por ID
-  ids_tab = np.load("ids_tabulares.npy")
-  ids_img = np.load("ids_imagenes.npy")
-  if not np.array_equal(ids_tab, ids_img):
-    print("[Error] Los IDs de tabulares e imágenes no coinciden en orden.")
-    print("Tabulares:", ids_tab)
-    print("Imágenes: ", ids_img)
-    sys.exit(1)
-  print(f"[OK] {len(ids_tab)} muestras alineadas exactamente por ID.")
+  if args.con_preprocesamiento:
+    ejecutar("estandarizacion/procesar_espectros_nir.py")
+    ejecutar("estandarizacion/crear_tensor_multicanal.py")
 
-  # 3. Generar partición estratificada fija (70% train / 15% val / 15% test) si no existe
-if not os.path.exists("particiones.npz"):
-  y = np.load("y_tabulares.npy")
-  idx_all = np.arange(len(y))
-  idx_temp, idx_test, y_temp, y_test = train_test_split(
-      idx_all, y, test_size=0.15, stratify=y, random_state=42
-  )
-  idx_train, idx_val = train_test_split(
-      idx_temp, test_size=0.15 / 0.85, stratify=y_temp, random_state=42
-  )
-  np.savez(
-      "particiones.npz",
-      idx_train=idx_train,
-      idx_val=idx_val,
-      idx_test=idx_test,
-  )
-  print("[OK] Creada particiones.npz (70% train / 15% val / 15% test).")
+  ejecutar("entrenar_rama_nir.py")
+  ejecutar("entrenar_rama_brix.py")
+  ejecutar("entrenar_rama_cnn.py")
+  ejecutar("entrenar_multimodal.py")
+  ejecutar("test_cargar_modelos.py")
 
-  # 4. Entrenar modelos unimodales y modelo multimodal
-  correr([sys.executable, "modelo_nir_mlp.py"])
-  correr([sys.executable, "modelo_brix_mlp.py"])
-  correr([sys.executable, "modelo_cnn.py"])
-  correr([sys.executable, "fusion_multimodal.py"])
+  if args.con_cv:
+    ejecutar("evaluar_cv_estratificada.py")
 
-  print("\n¡Pipeline completo ejecutado con éxito!")
+  print("\n" + "=" * 50)
+  print(">>> ¡Pipeline completo ejecutado con éxito!")
+  print(f">>> Modelos: {RAIZ / 'modelos_guardados'} | Métricas: {RAIZ / 'resultados'}")
+  print("=" * 50)
 
 
 if __name__ == "__main__":

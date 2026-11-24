@@ -1,272 +1,171 @@
-import os
-import keras
-from keras import layers, models
+"""Validación cruzada estratificada repetida (estimación honesta del rendimiento).
+
+Con solo 12 granuladas, un único test de 15 muestras (2 granuladas) es muy
+inestable. Aquí cada muestra se evalúa como "test" una vez por repetición.
+
+Por cada fold externo:
+  1. El fold de entrenamiento se divide (estratificado) en train interno / validación.
+  2. El escalado se ajusta SOLO con el train interno (sin fuga de datos).
+  3. La validación se usa para EarlyStopping y para elegir el umbral.
+  4. Se evalúa en el fold de test.
+
+Se reportan:
+  - Métricas OOF (out-of-fold) por repetición: las 100 predicciones juntas, AUC/F1
+    más estables. Se resume media ± desviación entre repeticiones.
+  - Métricas por fold (más variables, solo de referencia).
+
+Uso:
+  python evaluar_cv_estratificada.py                       # todas las ramas
+  python evaluar_cv_estratificada.py --ramas nir brix      # solo algunas
+  python evaluar_cv_estratificada.py --folds 5 --repeticiones 3
+"""
+import utilidades_datos as ud  # importar primero (configura TensorFlow)
+
+import argparse
+import time
+
 import numpy as np
-from sklearn.metrics import (
-    accuracy_score,
-    confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
-from sklearn.model_selection import StratifiedKFold, train_test_split
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import RepeatedStratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.utils.class_weight import compute_class_weight
-import tensorflow as tf
 
-# Reproducibilidad base
-SEED = 42
-np.random.seed(SEED)
-tf.random.set_seed(SEED)
+import arquitecturas as arq
+
+RAMAS_DISPONIBLES = ["logreg_nir", "logreg_brix", "nir", "brix", "cnn", "multimodal"]
+METRICAS = ["roc_auc", "f1_granulada", "recall_granulada", "especificidad", "balanced_accuracy", "accuracy"]
 
 
-def calcular_class_weight(y_sub):
-  clases = np.unique(y_sub)
-  pesos = compute_class_weight(class_weight="balanced", classes=clases, y=y_sub)
-  return {int(c): float(w) for c, w in zip(clases, pesos)}
+def _escalar(X, idx_fit, *idx_otros):
+  sc = StandardScaler().fit(X[idx_fit])
+  return [sc.transform(X[i]) for i in (idx_fit, *idx_otros)]
 
 
-def crear_modelo_nir(input_dim):
-  inp = layers.Input(shape=(input_dim,))
-  x = layers.Dense(32, activation="relu")(inp)
-  x = layers.Dropout(0.3)(x)
-  x = layers.Dense(16, activation="relu")(x)
-  out = layers.Dense(1, activation="sigmoid")(x)
-  m = models.Model(inp, out)
-  m.compile(
-      optimizer=keras.optimizers.Adam(learning_rate=1e-3),
-      loss="binary_crossentropy",
-  )
-  return m
+def predecir_fold(rama, datos, y, i_tr, i_va, i_te):
+  """Entrena la rama en (i_tr, i_va) y devuelve probabilidades para i_va e i_te."""
+  if rama.startswith("logreg_"):
+    X = datos["nir"] if rama == "logreg_nir" else datos["brix"]
+    X_tr, X_va, X_te = _escalar(X, i_tr, i_va, i_te)
+    clf = LogisticRegression(class_weight="balanced", max_iter=5000, C=1.0)
+    clf.fit(X_tr, y[i_tr])
+    return clf.predict_proba(X_va)[:, 1], clf.predict_proba(X_te)[:, 1]
+
+  if rama == "nir":
+    X_tr, X_va, X_te = _escalar(datos["nir"], i_tr, i_va, i_te)
+    modelo, epochs = arq.construir_mlp_nir(X_tr.shape[1]), 80
+  elif rama == "brix":
+    X_tr, X_va, X_te = _escalar(datos["brix"], i_tr, i_va, i_te)
+    modelo, epochs = arq.construir_mlp_brix(X_tr.shape[1]), 80
+  elif rama == "cnn":
+    X = datos["img"]
+    X_tr, X_va, X_te = X[i_tr], X[i_va], X[i_te]
+    modelo, epochs = arq.construir_cnn(X.shape[1:]), 50
+  elif rama == "multimodal":
+    n_tr, n_va, n_te = _escalar(datos["nir"], i_tr, i_va, i_te)
+    b_tr, b_va, b_te = _escalar(datos["brix"], i_tr, i_va, i_te)
+    img = datos["img"]
+    X_tr, X_va, X_te = [img[i_tr], n_tr, b_tr], [img[i_va], n_va, b_va], [img[i_te], n_te, b_te]
+    modelo, epochs = arq.construir_multimodal(img.shape[1:], n_tr.shape[1], b_tr.shape[1]), 80
+  else:
+    raise ValueError(f"Rama desconocida: {rama}")
+
+  ud.entrenar(modelo, X_tr, y[i_tr], X_va, y[i_va], epochs=epochs, verbose=0)
+  return modelo.predict(X_va, verbose=0).ravel(), modelo.predict(X_te, verbose=0).ravel()
 
 
-def crear_modelo_brix(input_dim):
-  inp = layers.Input(shape=(input_dim,))
-  x = layers.Dense(16, activation="relu")(inp)
-  x = layers.Dropout(0.2)(x)
-  x = layers.Dense(8, activation="relu")(x)
-  out = layers.Dense(1, activation="sigmoid")(x)
-  m = models.Model(inp, out)
-  m.compile(
-      optimizer=keras.optimizers.Adam(learning_rate=1e-3),
-      loss="binary_crossentropy",
-  )
-  return m
+def evaluar_rama(rama, datos, y, ids, folds, repeticiones):
+  import keras
 
+  rskf = RepeatedStratifiedKFold(n_splits=folds, n_repeats=repeticiones, random_state=ud.SEMILLA)
+  filas_fold, filas_oof, preds = [], [], []
+  oof_prob = np.zeros((repeticiones, len(y)))
+  oof_umbral = np.zeros((repeticiones, len(y)))
+  t0 = time.time()
 
-def crear_modelo_cnn(input_shape):
-  aug = keras.Sequential([
-      layers.RandomFlip("horizontal_and_vertical"),
-      layers.RandomRotation(0.08),
-  ])
-  inp = layers.Input(shape=input_shape)
-  x = aug(inp)
-  x = layers.Conv2D(16, (3, 3), activation="relu", padding="same")(x)
-  x = layers.MaxPooling2D((2, 2))(x)
-  x = layers.Conv2D(32, (3, 3), activation="relu", padding="same")(x)
-  x = layers.MaxPooling2D((2, 2))(x)
-  x = layers.Conv2D(64, (3, 3), activation="relu", padding="same")(x)
-  x = layers.GlobalAveragePooling2D()(x)
-  x = layers.Dense(32, activation="relu")(x)
-  x = layers.Dropout(0.5)(x)
-  out = layers.Dense(1, activation="sigmoid")(x)
-  m = models.Model(inp, out)
-  m.compile(
-      optimizer=keras.optimizers.Adam(learning_rate=1e-3),
-      loss="binary_crossentropy",
-  )
-  return m
-
-
-def crear_modelo_multimodal(img_shape, nir_dim, brix_dim):
-  # Rama 1: Imagen (compacta para evitar sobreajuste en 100 muestras)
-  in_img = layers.Input(shape=img_shape, name="in_img")
-  x_img = layers.Conv2D(16, (3, 3), activation="relu", padding="same")(in_img)
-  x_img = layers.MaxPooling2D((2, 2))(x_img)
-  x_img = layers.Conv2D(32, (3, 3), activation="relu", padding="same")(x_img)
-  x_img = layers.MaxPooling2D((2, 2))(x_img)
-  x_img = layers.Conv2D(64, (3, 3), activation="relu", padding="same")(x_img)
-  feat_img = layers.GlobalAveragePooling2D()(x_img)
-  feat_img = layers.Dense(16, activation="relu")(feat_img)
-
-  # Rama 2: NIR
-  in_nir = layers.Input(shape=(nir_dim,), name="in_nir")
-  x_nir = layers.Dense(32, activation="relu")(in_nir)
-  x_nir = layers.Dropout(0.3)(x_nir)
-  feat_nir = layers.Dense(16, activation="relu")(x_nir)
-
-  # Rama 3: Brix
-  in_brix = layers.Input(shape=(brix_dim,), name="in_brix")
-  x_brix = layers.Dense(16, activation="relu")(in_brix)
-  feat_brix = layers.Dense(8, activation="relu")(x_brix)
-
-  # Fusión
-  fusion = layers.Concatenate()([feat_img, feat_nir, feat_brix])
-  f = layers.Dense(32, activation="relu")(fusion)
-  f = layers.Dropout(0.4)(f)
-  out = layers.Dense(1, activation="sigmoid")(f)
-
-  m = models.Model(inputs=[in_img, in_nir, in_brix], outputs=out)
-  m.compile(
-      optimizer=keras.optimizers.Adam(learning_rate=5e-4),
-      loss="binary_crossentropy",
-  )
-  return m
-
-
-def entrenar_y_evaluar_cv(
-    tipo_modelo, X_img, X_nir, X_brix, y, n_splits=5, umbral=0.5
-):
-  skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
-  oof_probs = np.zeros(len(y), dtype=np.float32)
-
-  accs, precs, recs, f1s, aucs = [], [], [], [], []
-  cm_total = np.zeros((2, 2), dtype=int)
-
-  for fold, (tr_full_idx, te_idx) in enumerate(skf.split(np.zeros(len(y)), y), 1):
-    keras.backend.clear_session()
-
-    # Separar validación interna solo desde tr_full_idx (sin tocar te_idx)
-    tr_idx, va_idx = train_test_split(
-        tr_full_idx,
-        test_size=0.15,
-        stratify=y[tr_full_idx],
-        random_state=SEED + fold,
+  for k, (i_ext, i_te) in enumerate(rskf.split(np.zeros(len(y)), y)):
+    rep, fold = divmod(k, folds)
+    ud.fijar_semilla(ud.SEMILLA + k)
+    i_tr, i_va = train_test_split(
+        i_ext, test_size=0.2, stratify=y[i_ext], random_state=ud.SEMILLA + k
     )
+    p_va, p_te = predecir_fold(rama, datos, y, i_tr, i_va, i_te)
+    umbral = ud.elegir_umbral(y[i_va], p_va)
+    oof_prob[rep, i_te] = p_te
+    oof_umbral[rep, i_te] = umbral
 
-    cw = calcular_class_weight(y[tr_idx])
-    cb = [
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=8, restore_best_weights=True
-        )
-    ]
+    for nombre_u, u in (("0.50", 0.5), ("validacion", umbral)):
+      m = ud.calcular_metricas(y[i_te], p_te, u)
+      filas_fold.append({"rama": rama, "repeticion": rep, "fold": fold, "tipo_umbral": nombre_u,
+                         **{c: m[c] for c in METRICAS}, "umbral": u})
+    preds.extend({"rama": rama, "repeticion": rep, "fold": fold, "ID": ids[j], "y_real": int(y[j]),
+                  "prob_granulada": float(p), "umbral_validacion": umbral} for j, p in zip(i_te, p_te))
+    keras.backend.clear_session()
+    print(f"  [{rama}] rep {rep + 1}/{repeticiones} fold {fold + 1}/{folds} "
+          f"(umbral val={umbral:.3f}) - {time.time() - t0:.0f}s", flush=True)
 
-    if tipo_modelo in ("NIR", "MULTIMODAL"):
-      sc_nir = StandardScaler().fit(X_nir[tr_idx])
-      nir_tr = sc_nir.transform(X_nir[tr_idx])
-      nir_va = sc_nir.transform(X_nir[va_idx])
-      nir_te = sc_nir.transform(X_nir[te_idx])
-
-    if tipo_modelo in ("BRIX", "MULTIMODAL"):
-      sc_brix = StandardScaler().fit(X_brix[tr_idx])
-      brix_tr = sc_brix.transform(X_brix[tr_idx])
-      brix_va = sc_brix.transform(X_brix[va_idx])
-      brix_te = sc_brix.transform(X_brix[te_idx])
-
-    if tipo_modelo == "NIR":
-      modelo = crear_modelo_nir(X_nir.shape[1])
-      modelo.fit(
-          nir_tr,
-          y[tr_idx],
-          validation_data=(nir_va, y[va_idx]),
-          epochs=80,
-          batch_size=8,
-          class_weight=cw,
-          callbacks=cb,
-          verbose=0,
-      )
-      probs = modelo.predict(nir_te, verbose=0).ravel()
-
-    elif tipo_modelo == "BRIX":
-      modelo = crear_modelo_brix(X_brix.shape[1])
-      modelo.fit(
-          brix_tr,
-          y[tr_idx],
-          validation_data=(brix_va, y[va_idx]),
-          epochs=80,
-          batch_size=8,
-          class_weight=cw,
-          callbacks=cb,
-          verbose=0,
-      )
-      probs = modelo.predict(brix_te, verbose=0).ravel()
-
-    elif tipo_modelo == "CNN":
-      modelo = crear_modelo_cnn(X_img.shape[1:])
-      modelo.fit(
-          X_img[tr_idx],
-          y[tr_idx],
-          validation_data=(X_img[va_idx], y[va_idx]),
-          epochs=50,
-          batch_size=8,
-          class_weight=cw,
-          callbacks=cb,
-          verbose=0,
-      )
-      probs = modelo.predict(X_img[te_idx], verbose=0).ravel()
-
-    elif tipo_modelo == "MULTIMODAL":
-      modelo = crear_modelo_multimodal(
-          X_img.shape[1:], X_nir.shape[1], X_brix.shape[1]
-      )
-      modelo.fit(
-          [X_img[tr_idx], nir_tr, brix_tr],
-          y[tr_idx],
-          validation_data=([X_img[va_idx], nir_va, brix_va], y[va_idx]),
-          epochs=60,
-          batch_size=8,
-          class_weight=cw,
-          callbacks=cb,
-          verbose=0,
-      )
-      probs = modelo.predict([X_img[te_idx], nir_te, brix_te], verbose=0).ravel()
-
-    oof_probs[te_idx] = probs
-    preds = (probs >= umbral).astype(int)
-    y_te = y[te_idx]
-
-    accs.append(accuracy_score(y_te, preds))
-    precs.append(precision_score(y_te, preds, zero_division=0))
-    recs.append(recall_score(y_te, preds, zero_division=0))
-    f1s.append(f1_score(y_te, preds, zero_division=0))
-    if len(np.unique(y_te)) > 1:
-      aucs.append(roc_auc_score(y_te, probs))
-    cm_total += confusion_matrix(y_te, preds, labels=[0, 1])
-
-  oof_preds = (oof_probs >= umbral).astype(int)
-  oof_auc = roc_auc_score(y, oof_probs) if len(np.unique(y)) > 1 else np.nan
-  oof_f1 = f1_score(y, oof_preds, zero_division=0)
-  oof_rec = recall_score(y, oof_preds, zero_division=0)
-  oof_prec = precision_score(y, oof_preds, zero_division=0)
-
-  print(f"\n================ {tipo_modelo} ({n_splits}-FOLD CV) ================")
-  print(f"Acc por fold : {np.mean(accs):.4f} ± {np.std(accs):.4f}")
-  print(f"Prec por fold: {np.mean(precs):.4f} ± {np.std(precs):.4f}")
-  print(f"Rec por fold : {np.mean(recs):.4f} ± {np.std(recs):.4f}")
-  print(f"F1 por fold  : {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
-  if aucs:
-    print(f"AUC por fold : {np.mean(aucs):.4f} ± {np.std(aucs):.4f}")
-  print(
-      f"OOF Global   -> AUC: {oof_auc:.4f} | F1: {oof_f1:.4f} | "
-      f"Recall(1): {oof_rec:.4f} | Prec(1): {oof_prec:.4f}"
-  )
-  print("Matriz de confusión acumulada (OOF):\n", cm_total)
-
-  return oof_probs
+  for rep in range(repeticiones):
+    p = oof_prob[rep]
+    auc_rep = float(roc_auc_score(y, p))
+    for nombre_u, pred in (("0.50", (p >= 0.5).astype(int)), ("validacion", (p >= oof_umbral[rep]).astype(int))):
+      m = ud.calcular_metricas(y, pred.astype(float), 0.5)
+      m["roc_auc"] = auc_rep
+      filas_oof.append({"rama": rama, "repeticion": rep, "tipo_umbral": nombre_u,
+                        **{c: m[c] for c in METRICAS}, "matriz_confusion": m["matriz_confusion"]})
+  return filas_fold, filas_oof, preds
 
 
 def main():
-  X_img = np.load("X_dataset_multicanal.npy")
-  X_nir = np.load("X_nir_24.npy")
-  X_brix = np.load("X_brix_4.npy")
-  y = np.load("y_tabulares.npy")
+  parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+  parser.add_argument("--ramas", nargs="+", default=RAMAS_DISPONIBLES, choices=RAMAS_DISPONIBLES)
+  parser.add_argument("--folds", type=int, default=5)
+  parser.add_argument("--repeticiones", type=int, default=3)
+  args = parser.parse_args()
 
-  assert len(X_img) == len(X_nir) == len(X_brix) == len(y), (
-      "Los arreglos no tienen la misma cantidad de muestras."
-  )
+  ids, y = ud.cargar_etiquetas()
+  datos = {"nir": ud.cargar_nir(ids)[0], "brix": ud.cargar_brix(ids)[0]}
+  if {"cnn", "multimodal"} & set(args.ramas):
+    datos["img"] = ud.cargar_imagenes(ids, y_ref=y)
+  print(f"Datos: n={len(y)} | granuladas={int(y.sum())} | {args.folds} folds x {args.repeticiones} repeticiones")
 
-  os.makedirs("resultados_cv", exist_ok=True)
-  oof_dict = {"y": y}
+  ud.RESULTADOS.mkdir(parents=True, exist_ok=True)
+  todas_fold, todas_oof = [], []
+  for rama in args.ramas:
+    print(f"\n>>> Rama: {rama}")
+    f_fold, f_oof, preds = evaluar_rama(rama, datos, y, ids, args.folds, args.repeticiones)
+    todas_fold += f_fold
+    todas_oof += f_oof
+    pd.DataFrame(preds).to_csv(ud.RESULTADOS / f"cv_predicciones_{rama}.csv", index=False)
 
-  for variante in ["NIR", "BRIX", "CNN", "MULTIMODAL"]:
-    oof_probs = entrenar_y_evaluar_cv(
-        variante, X_img, X_nir, X_brix, y, n_splits=5, umbral=0.5
-    )
-    oof_dict[variante.lower()] = oof_probs
+  df_fold, df_oof = pd.DataFrame(todas_fold), pd.DataFrame(todas_oof)
+  # Si se evaluó un subconjunto de ramas, se conservan las demás de ejecuciones previas
+  for nombre, df in (("cv_por_fold.csv", df_fold), ("cv_oof_por_repeticion.csv", df_oof)):
+    ruta = ud.RESULTADOS / nombre
+    if ruta.exists():
+      previo = pd.read_csv(ruta)
+      df = pd.concat([previo[~previo["rama"].isin(args.ramas)], df], ignore_index=True)
+    df.to_csv(ruta, index=False)
+    if nombre == "cv_oof_por_repeticion.csv":
+      df_oof = df
 
-  np.savez("resultados_cv/oof_probabilidades.npz", **oof_dict)
-  print("\nProbabilidades OOF guardadas en 'resultados_cv/oof_probabilidades.npz'.")
+  resumen = df_oof.groupby(["rama", "tipo_umbral"])[METRICAS].agg(["mean", "std"]).round(4)
+  resumen.columns = [f"{m}_{s}" for m, s in resumen.columns]
+  resumen = resumen.reset_index()
+  orden = {r: i for i, r in enumerate(RAMAS_DISPONIBLES)}
+  resumen = resumen.sort_values(["tipo_umbral", "rama"], key=lambda s: s.map(orden) if s.name == "rama" else s)
+  resumen.to_csv(ud.RESULTADOS / "cv_resumen.csv", index=False)
+
+  print("\n" + "=" * 98)
+  print("RESUMEN CV (predicciones out-of-fold; media ± desviación entre repeticiones)")
+  print("=" * 98)
+  for tipo in ("0.50", "validacion"):
+    print(f"\nUmbral: {'fijo 0.50' if tipo == '0.50' else 'elegido en validación interna'}")
+    print(f"{'rama':<12} {'ROC-AUC':>15} {'F1 gran.':>15} {'Recall gran.':>15} {'Especif.':>15} {'Bal. Acc':>15}")
+    for _, r in resumen[resumen["tipo_umbral"] == tipo].iterrows():
+      celdas = [f"{r[f'{m}_mean']:.3f} ± {r[f'{m}_std']:.3f}" for m in
+                ("roc_auc", "f1_granulada", "recall_granulada", "especificidad", "balanced_accuracy")]
+      print(f"{r['rama']:<12} " + " ".join(f"{c:>15}" for c in celdas))
+  print(f"\nArchivos en {ud.RESULTADOS}: cv_resumen.csv, cv_oof_por_repeticion.csv, cv_por_fold.csv, cv_predicciones_*.csv")
 
 
 if __name__ == "__main__":

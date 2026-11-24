@@ -1,0 +1,72 @@
+{
+  "rama": "multimodal",
+  "semilla": 42,
+  "umbral_validacion": 0.7030731439590454,
+  "epocas_entrenadas": 24,
+  "validacion": {
+    "umbral": 0.7030731439590454,
+    "n": 16,
+    "n_granuladas": 2,
+    "accuracy": 0.875,
+    "balanced_accuracy": 0.7142857142857143,
+    "roc_auc": 0.6071428571428572,
+    "f1_granulada": 0.5,
+    "precision_granulada": 0.5,
+    "recall_granulada": 0.5,
+    "especificidad": 0.9285714285714286,
+    "matriz_confusion": [
+      [
+        13,
+        1
+      ],
+      [
+        1,
+        1
+      ]
+    ]
+  },
+  "test_umbral_050": {
+    "umbral": 0.5,
+    "n": 15,
+    "n_granuladas": 2,
+    "accuracy": 0.6,
+    "balanced_accuracy": 0.34615384615384615,
+    "roc_auc": 0.5384615384615384,
+    "f1_granulada": 0.0,
+    "precision_granulada": 0.0,
+    "recall_granulada": 0.0,
+    "especificidad": 0.6923076923076923,
+    "matriz_confusion": [
+      [
+        9,
+        4
+      ],
+      [
+        2,
+        0
+      ]
+    ]
+  },
+  "test_umbral_validacion": {
+    "umbral": 0.7030731439590454,
+    "n": 15,
+    "n_granuladas": 2,
+    "accuracy": 0.7333333333333333,
+    "balanced_accuracy": 0.4230769230769231,
+    "roc_auc": 0.5384615384615384,
+    "f1_granulada": 0.0,
+    "precision_granulada": 0.0,
+    "recall_granulada": 0.0,
+    "especificidad": 0.8461538461538461,
+    "matriz_confusion": [
+      [
+        11,
+        2
+      ],
+      [
+        2,
+        0
+      ]
+    ]
+  }
+}

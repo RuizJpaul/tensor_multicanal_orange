@@ -1,6 +1,36 @@
-/evidencias
+# ==========================================
+# 1. Entorno virtual y cachés de Python
+# ==========================================
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
 
-/evidencias/roi
-/muestras_brix
-/muestras_filtros
-/muestras_nir
+# ==========================================
+# 2. Fotos crudas pesadas (~184 MB)
+#    Se conservan en Git los Excel, CSV NIR, particiones.npz y X_dataset_multicanal.npy
+# ==========================================
+datos/fotos_rgb_nir_uv/
+
+# ==========================================
+# 3. Respaldos locales, documentos Word temporales y logs
+# ==========================================
+modelos_guardados/respaldo_*/
+INFORME_*.docx
+resultados/*.log
+resultados/log_*.txt
+*.log
+
+# ==========================================
+# 4. Editores / IDEs y archivos del sistema
+# ==========================================
+.vscode/
+.idea/
+~$*
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,72 @@
+{
+  "rama": "brix",
+  "semilla": 42,
+  "umbral_validacion": 0.5278294086456299,
+  "epocas_entrenadas": 80,
+  "validacion": {
+    "umbral": 0.5278294086456299,
+    "n": 16,
+    "n_granuladas": 2,
+    "accuracy": 0.8125,
+    "balanced_accuracy": 0.8928571428571428,
+    "roc_auc": 0.8571428571428571,
+    "f1_granulada": 0.5714285714285714,
+    "precision_granulada": 0.4,
+    "recall_granulada": 1.0,
+    "especificidad": 0.7857142857142857,
+    "matriz_confusion": [
+      [
+        11,
+        3
+      ],
+      [
+        0,
+        2
+      ]
+    ]
+  },
+  "test_umbral_050": {
+    "umbral": 0.5,
+    "n": 15,
+    "n_granuladas": 2,
+    "accuracy": 0.4666666666666667,
+    "balanced_accuracy": 0.6923076923076923,
+    "roc_auc": 0.6153846153846154,
+    "f1_granulada": 0.3333333333333333,
+    "precision_granulada": 0.2,
+    "recall_granulada": 1.0,
+    "especificidad": 0.38461538461538464,
+    "matriz_confusion": [
+      [
+        5,
+        8
+      ],
+      [
+        0,
+        2
+      ]
+    ]
+  },
+  "test_umbral_validacion": {
+    "umbral": 0.5278294086456299,
+    "n": 15,
+    "n_granuladas": 2,
+    "accuracy": 0.7333333333333333,
+    "balanced_accuracy": 0.4230769230769231,
+    "roc_auc": 0.6153846153846154,
+    "f1_granulada": 0.0,
+    "precision_granulada": 0.0,
+    "recall_granulada": 0.0,
+    "especificidad": 0.8461538461538461,
+    "matriz_confusion": [
+      [
+        11,
+        2
+      ],
+      [
+        2,
+        0
+      ]
+    ]
+  }
+}
